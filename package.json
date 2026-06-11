@@ -1,0 +1,17 @@
+{
+  "name": "precisionit-mail",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "PrecisionIT MCP server — send email via SMTP2GO HTTP API, creds injected by Key Vault launcher.",
+  "bin": { "precisionit-mail": "server.js" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
