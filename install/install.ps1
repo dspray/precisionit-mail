@@ -3,8 +3,8 @@
  PrecisionIT - precisionit-mail (SMTP2GO) MCP connector installer (Windows)
 =============================================================================
  Installs the precisionit-mail MCP server and wires BOTH Claude Code
- (~/.claude.json) and Claude Desktop (%APPDATA%\Claude\claude_desktop_config.json)
- with machine-resolved absolute paths.
+ (~/.claude.json) and Claude Desktop (MSIX path under %LOCALAPPDATA%\Packages\
+ or %APPDATA%\Claude for the standalone build) with machine-resolved absolute paths.
 
  Key sources:
    keyvault (default) - SMTP2GO key pulled at runtime from Azure Key Vault via the
@@ -43,35 +43,6 @@ function Die  ($m) { Write-Host "[mail-install] FATAL: $m" -ForegroundColor Red;
 
 # UTF-8 *without* BOM — the only safe encoding for Claude Desktop's config parser.
 $Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-
-# ---- 0a. Claude Desktop build gate (Microsoft Store / MSIX is unsupported) --
-# The Store/MSIX build of Claude Desktop runs sandboxed and does NOT read the
-# claude_desktop_config.json this installer writes, so MCP connectors never load.
-# The standalone build is required. Detection: the MSIX build registers as an Appx
-# package named "Claude"; the standalone build does not register as Appx at all
-# (it installs under %LOCALAPPDATA%\AnthropicClaude\).
-$msix = $null
-try { $msix = Get-AppxPackage -Name "Claude" -ErrorAction SilentlyContinue } catch {}
-if ($msix) {
-  Warn "Claude Desktop is the Microsoft Store / MSIX build:"
-  Warn "  $($msix.PackageFullName)"
-  Warn "That build will NOT load MCP connectors. Replace it with the standalone build, then re-run this installer."
-  Write-Host ""
-  Write-Host "  >>> COPY BOTH LINES BELOW INTO NOTEPAD BEFORE YOU RUN ANYTHING <<<" -ForegroundColor Yellow
-  Write-Host "  Step 1 CLOSES Claude Desktop. If you are reading this inside a Claude Desktop" -ForegroundColor Yellow
-  Write-Host "  chat, that chat ends the instant it runs - so you need these from Notepad." -ForegroundColor Yellow
-  Write-Host ""
-  Write-Host "  1) Uninstall the Store/MSIX build (PowerShell):" -ForegroundColor Cyan
-  Write-Host '     Get-AppxPackage -Name "Claude" | Remove-AppxPackage'
-  Write-Host ""
-  Write-Host "  2) Download + install the standalone build, then launch it once:" -ForegroundColor Cyan
-  Write-Host "     https://downloads.claude.ai/releases/win32/ClaudeSetup.exe"
-  Write-Host ""
-  Write-Host "  (If step 1 fails with 0x80073CFA, reopen PowerShell as Administrator and run:" -ForegroundColor DarkGray
-  Write-Host '     Get-AppxPackage -Name "Claude" -AllUsers | Remove-AppxPackage -AllUsers )' -ForegroundColor DarkGray
-  Write-Host ""
-  Die "Standalone Claude Desktop required. Re-run this installer after the standalone build is installed and launched once."
-}
 
 # ---- 0. Validate ------------------------------------------------------------
 if ([string]::IsNullOrWhiteSpace($MailSender)) { Die "MAIL_SENDER is required (a verified SMTP2GO sender). Set `$env:MAIL_SENDER='you@myprecisionit.com' and re-run." }
@@ -150,6 +121,15 @@ if ($KeySource -eq "keyvault") {
 }
 
 # ---- 5. Read-modify-write a config (preserves other connectors, BOM-free) --
+function Resolve-DesktopConfigPath {
+  $pkg = $null
+  try { $pkg = Get-AppxPackage -Name "Claude" -ErrorAction SilentlyContinue | Select-Object -First 1 } catch {}
+  if ($pkg) {
+    return (Join-Path $env:LOCALAPPDATA ("Packages\{0}\LocalCache\Roaming\Claude\claude_desktop_config.json" -f $pkg.PackageFamilyName))
+  }
+  return (Join-Path $env:APPDATA "Claude\claude_desktop_config.json")
+}
+
 function Wire-Config([string]$Cfg, [string]$Label) {
   $dir = Split-Path -Parent $Cfg
   if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Force -Path $dir | Out-Null }
@@ -166,7 +146,7 @@ function Wire-Config([string]$Cfg, [string]$Label) {
 }
 
 Wire-Config (Join-Path $env:USERPROFILE ".claude.json") "Claude Code"
-Wire-Config (Join-Path $env:APPDATA "Claude\claude_desktop_config.json") "Claude Desktop (Windows)"
+Wire-Config (Resolve-DesktopConfigPath) "Claude Desktop (Windows)"
 
 Say "Install complete (key source: $KeySource, sender: $MailSender)."
 if ($KeySource -eq "keyvault") {
