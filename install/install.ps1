@@ -33,7 +33,7 @@ param(
   [string]$KeySource   = $(if ($env:MAIL_KEY_SOURCE)           { $env:MAIL_KEY_SOURCE }           else { "keyvault" }),
   [string]$Smtp2goKey  = $env:SMTP2GO_API_KEY,
   # >>> CONFIRM this matches the real vault secret name holding the SMTP2GO key <<<
-  [string]$SecretSpec  = $(if ($env:MAIL_SECRET_SPEC)          { $env:MAIL_SECRET_SPEC }          else { "Smtp2goApiKey:SMTP2GO_API_KEY" })
+  [string]$SecretSpec  = $(if ($env:MAIL_SECRET_SPEC)          { $env:MAIL_SECRET_SPEC }          else { "smtp2go-send-api-key:SMTP2GO_API_KEY" })
 )
 $ErrorActionPreference = "Stop"
 

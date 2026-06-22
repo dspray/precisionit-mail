@@ -23,7 +23,7 @@
 # Optional:
 #   MAIL_KEY_SOURCE=keyvault|static          (default keyvault)
 #   SMTP2GO_API_KEY=api-...                   (required only when MAIL_KEY_SOURCE=static)
-#   MAIL_SECRET_SPEC="Smtp2goApiKey:SMTP2GO_API_KEY"   (vault secret name : env var)
+#   MAIL_SECRET_SPEC="smtp2go-send-api-key:SMTP2GO_API_KEY"   (vault secret name : env var)
 # =============================================================================
 set -euo pipefail
 
@@ -32,7 +32,7 @@ INSTALL_ROOT="${PRECISIONIT_MAIL_HOME:-$HOME/Claude/mcp}"
 KV_VAULT_RW_URL="${KV_VAULT_RW_URL:-https://PrecisionIT-MCP-RW.vault.azure.net/}"
 KV_VAULT_RO_URL="${KV_VAULT_RO_URL:-https://PrecisionIT-MCP-RO.vault.azure.net/}"
 # >>> CONFIRM this matches the real vault secret name holding the SMTP2GO key <<<
-SECRET_SPEC="${MAIL_SECRET_SPEC:-Smtp2goApiKey:SMTP2GO_API_KEY}"
+SECRET_SPEC="${MAIL_SECRET_SPEC:-smtp2go-send-api-key:SMTP2GO_API_KEY}"
 KEY_SOURCE="${MAIL_KEY_SOURCE:-keyvault}"
 
 say()  { printf '\033[1;34m[mail-install]\033[0m %s\n' "$*"; }
