@@ -48,11 +48,19 @@ async function buildAttachments(paths) {
   let total = 0;
   for (const p of asArray(paths)) {
     if (p !== null && typeof p === "object") {
-      // Pre-encoded by the gateway — the gateway process read the file before
-      // forwarding to avoid ENOENT in this spawned child process.
-      const decoded = Buffer.from(p.fileblob, "base64");
+      // Pre-encoded content object { filename, content_base64, mimetype? } —
+      // caller read the file client-side and passed the bytes directly.
+      // Also accepts the internal gateway shape { filename, fileblob, mimetype }.
+      const b64 = p.content_base64 ?? p.fileblob;
+      if (!b64) throw new Error(`Attachment object missing content_base64: ${JSON.stringify(p)}`);
+      const ext = extname(p.filename ?? "").toLowerCase();
+      const decoded = Buffer.from(b64, "base64");
       total += decoded.length;
-      out.push({ filename: p.filename, fileblob: p.fileblob, mimetype: p.mimetype });
+      out.push({
+        filename: p.filename,
+        fileblob: b64,
+        mimetype: p.mimetype || MIME[ext] || "application/octet-stream",
+      });
     } else {
       let buf;
       try {
@@ -82,9 +90,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       name: "send_email",
       description:
         "Send an email via SMTP2GO from dan@myprecisionit.com (or an override). " +
-        "Supports HTML and/or plain-text bodies, cc/bcc, reply-to, and file attachments " +
-        "given as local file paths (read and base64-encoded automatically). " +
-        "Intended primarily for sending generated reports. Sends immediately unless MAIL_DRY_RUN is set.",
+        "Supports HTML and/or plain-text bodies, cc/bcc, reply-to, and file attachments. " +
+        "ATTACHMENTS: pass a { filename, content_base64, mimetype? } object (base64-encode " +
+        "the file first via Bash: base64 -i /path/to/file) — file path strings only work " +
+        "when the server process can read them directly (local stdio, not the remote gateway). " +
+        "Intended primarily for sending generated reports.",
       inputSchema: {
         type: "object",
         properties: {
@@ -103,8 +113,42 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             description: `From address. Defaults to ${DEFAULT_SENDER}. Domain must be verified in SMTP2GO.`,
           },
           attachments: {
-            description: "Local file path(s) to attach.",
-            anyOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+            description:
+              "File attachment(s). Each item is EITHER a local file path string (only works " +
+              "when the server process can read the path — i.e. the local stdio connector, not " +
+              "the remote gateway) OR a pre-encoded content object for remote/gateway use: " +
+              "{ filename: string, content_base64: string, mimetype?: string }. " +
+              "To attach a file via the remote gateway, base64-encode it first " +
+              "(e.g. Bash: base64 -i /path/to/file) and pass the object form.",
+            anyOf: [
+              { type: "string" },
+              {
+                type: "object",
+                properties: {
+                  filename: { type: "string" },
+                  content_base64: { type: "string", description: "Base64-encoded file content." },
+                  mimetype: { type: "string" },
+                },
+                required: ["filename", "content_base64"],
+              },
+              {
+                type: "array",
+                items: {
+                  anyOf: [
+                    { type: "string" },
+                    {
+                      type: "object",
+                      properties: {
+                        filename: { type: "string" },
+                        content_base64: { type: "string" },
+                        mimetype: { type: "string" },
+                      },
+                      required: ["filename", "content_base64"],
+                    },
+                  ],
+                },
+              },
+            ],
           },
         },
         required: ["to", "subject"],
