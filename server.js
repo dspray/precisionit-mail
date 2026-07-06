@@ -47,18 +47,26 @@ async function buildAttachments(paths) {
   const out = [];
   let total = 0;
   for (const p of asArray(paths)) {
-    let buf;
-    try {
-      buf = await readFile(p);
-    } catch (e) {
-      throw new Error(`Attachment not found or unreadable: ${p} (${e.code || e.message})`);
+    if (p !== null && typeof p === "object") {
+      // Pre-encoded by the gateway — the gateway process read the file before
+      // forwarding to avoid ENOENT in this spawned child process.
+      const decoded = Buffer.from(p.fileblob, "base64");
+      total += decoded.length;
+      out.push({ filename: p.filename, fileblob: p.fileblob, mimetype: p.mimetype });
+    } else {
+      let buf;
+      try {
+        buf = await readFile(String(p));
+      } catch (e) {
+        throw new Error(`Attachment not found or unreadable: ${p} (${e.code || e.message})`);
+      }
+      total += buf.length;
+      out.push({
+        filename: basename(String(p)),
+        fileblob: buf.toString("base64"),
+        mimetype: MIME[extname(String(p)).toLowerCase()] || "application/octet-stream",
+      });
     }
-    total += buf.length;
-    out.push({
-      filename: basename(p),
-      fileblob: buf.toString("base64"),
-      mimetype: MIME[extname(p).toLowerCase()] || "application/octet-stream",
-    });
   }
   return { attachments: out, total };
 }
