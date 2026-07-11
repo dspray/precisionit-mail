@@ -5,10 +5,14 @@
  * Credentials are NEVER read from config. They arrive as environment variables,
  * injected at runtime by the Key Vault launcher (mcp-keyvault-launch.js):
  *
- *   SMTP2GO_API_KEY   (required)  — key scoped to /email/send
- *   MAIL_SENDER       (optional)  — default From; falls back to dan@myprecisionit.com
- *   SMTP2GO_API_BASE  (optional)  — override region, e.g. https://us-api.smtp2go.com/v3
- *   MAIL_DRY_RUN      (optional)  — "1"/"true" → don't send, just report what would send
+ *   SMTP2GO_API_KEY              (required)  — key scoped to /email/send
+ *   MAIL_SENDER                  (optional)  — default From; falls back to dan@myprecisionit.com
+ *   SMTP2GO_API_BASE             (optional)  — override region, e.g. https://us-api.smtp2go.com/v3
+ *   MAIL_DRY_RUN                 (optional)  — "1"/"true" → don't send, just report what would send
+ *   MAIL_ATTACHMENT_URL_ALLOWLIST (optional)  — extra comma-separated hostname globs beyond the
+ *                                               built-in defaults (*.myprecisionit.com,
+ *                                               *.blob.core.windows.net, graph.microsoft.com,
+ *                                               *.sharepoint.com, *.onedrive.com)
  *
  * Exposes one tool: send_email
  */
@@ -27,6 +31,31 @@ const API_KEY = process.env.SMTP2GO_API_KEY;
 const DEFAULT_SENDER = process.env.MAIL_SENDER || "dan@myprecisionit.com";
 const DRY_RUN = /^(1|true|yes)$/i.test(process.env.MAIL_DRY_RUN || "");
 const MAX_TOTAL_BYTES = 50 * 1024 * 1024; // SMTP2GO hard cap: 50 MB content+attachments+headers
+const FETCH_TIMEOUT_MS = 30_000;
+
+// Hosts the server is allowed to fetch attachment bytes from.
+// Prevents SSRF: the gateway runs in Azure, so unrestricted URL fetch = internal network access.
+const ALLOWED_URL_HOSTS = new Set([
+  "graph.microsoft.com",
+  ...[ "*.myprecisionit.com", "*.blob.core.windows.net", "*.sharepoint.com", "*.onedrive.com" ]
+    .map(g => g), // stored as glob patterns, matched below
+]);
+const ALLOWED_URL_GLOBS = [
+  "*.myprecisionit.com",
+  "*.blob.core.windows.net",
+  "*.sharepoint.com",
+  "*.onedrive.com",
+  ...(process.env.MAIL_ATTACHMENT_URL_ALLOWLIST || "").split(",").map(s => s.trim()).filter(Boolean),
+];
+const ALLOWED_URL_EXACT = new Set(["graph.microsoft.com"]);
+
+function isAllowedHost(hostname) {
+  if (ALLOWED_URL_EXACT.has(hostname)) return true;
+  return ALLOWED_URL_GLOBS.some(glob => {
+    if (glob.startsWith("*.")) return hostname === glob.slice(2) || hostname.endsWith("." + glob.slice(2));
+    return hostname === glob;
+  });
+}
 
 const MIME = {
   ".pdf": "application/pdf",
@@ -48,19 +77,53 @@ async function buildAttachments(paths) {
   let total = 0;
   for (const p of asArray(paths)) {
     if (p !== null && typeof p === "object") {
-      // Pre-encoded content object { filename, content_base64, mimetype? } —
-      // caller read the file client-side and passed the bytes directly.
-      // Also accepts the internal gateway shape { filename, fileblob, mimetype }.
-      const b64 = p.content_base64 ?? p.fileblob;
-      if (!b64) throw new Error(`Attachment object missing content_base64: ${JSON.stringify(p)}`);
-      const ext = extname(p.filename ?? "").toLowerCase();
-      const decoded = Buffer.from(b64, "base64");
-      total += decoded.length;
-      out.push({
-        filename: p.filename,
-        fileblob: b64,
-        mimetype: p.mimetype || MIME[ext] || "application/octet-stream",
-      });
+      if (p.url) {
+        // URL-reference form: { filename, url, mimetype? }
+        // Server fetches the bytes — no inline base64 required from the caller.
+        let parsed;
+        try { parsed = new URL(p.url); } catch { throw new Error(`Invalid attachment URL: ${p.url}`); }
+        if (parsed.protocol !== "https:") throw new Error(`Attachment URL must use HTTPS: ${p.url}`);
+        if (!isAllowedHost(parsed.hostname)) {
+          throw new Error(
+            `Attachment URL host "${parsed.hostname}" is not in the allowlist. ` +
+            `Use a URL under *.myprecisionit.com, *.blob.core.windows.net, *.sharepoint.com, ` +
+            `*.onedrive.com, graph.microsoft.com, or add it to MAIL_ATTACHMENT_URL_ALLOWLIST.`
+          );
+        }
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
+        let buf;
+        try {
+          const resp = await fetch(p.url, { signal: ctrl.signal });
+          if (!resp.ok) throw new Error(`HTTP ${resp.status} fetching attachment URL`);
+          buf = Buffer.from(await resp.arrayBuffer());
+        } catch (e) {
+          throw new Error(`Failed to fetch attachment URL "${p.url}": ${e.message}`);
+        } finally {
+          clearTimeout(timer);
+        }
+        total += buf.length;
+        const ext = extname(p.filename ?? parsed.pathname).toLowerCase();
+        out.push({
+          filename: p.filename || parsed.pathname.split("/").pop() || "attachment",
+          fileblob: buf.toString("base64"),
+          mimetype: p.mimetype || MIME[ext] || "application/octet-stream",
+        });
+      } else {
+        // Pre-encoded content object { filename, content_base64, mimetype? } —
+        // caller read the file client-side and passed the bytes directly.
+        // Also accepts the internal gateway shape { filename, fileblob, mimetype }.
+        const b64 = p.content_base64 ?? p.fileblob;
+        if (!b64) throw new Error(`Attachment object missing content_base64 or url: ${JSON.stringify(p)}`);
+        const ext = extname(p.filename ?? "").toLowerCase();
+        const decoded = Buffer.from(b64, "base64");
+        total += decoded.length;
+        out.push({
+          filename: p.filename,
+          fileblob: b64,
+          mimetype: p.mimetype || MIME[ext] || "application/octet-stream",
+        });
+      }
     } else {
       let buf;
       try {
@@ -91,10 +154,16 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       description:
         "Send an email via SMTP2GO from dan@myprecisionit.com (or an override). " +
         "Supports HTML and/or plain-text bodies, cc/bcc, reply-to, and file attachments. " +
-        "ATTACHMENTS: pass a { filename, content_base64, mimetype? } object (base64-encode " +
-        "the file first via Bash: base64 -i /path/to/file) — file path strings only work " +
-        "when the server process can read them directly (local stdio, not the remote gateway). " +
-        "Intended primarily for sending generated reports.",
+        "ATTACHMENTS — three forms accepted: " +
+        "(1) URL-reference (preferred for large files, works everywhere): " +
+        "{ filename, url, mimetype? } — pass an HTTPS URL from *.myprecisionit.com, " +
+        "*.blob.core.windows.net, *.sharepoint.com, *.onedrive.com, or graph.microsoft.com; " +
+        "the server fetches the bytes, no inline base64 needed. " +
+        "(2) Inline base64 (small files only, works everywhere): " +
+        "{ filename, content_base64, mimetype? } — base64-encode the file first " +
+        "(Bash: base64 -i /path/to/file). " +
+        "(3) File path string (local stdio only): only works when the server process runs " +
+        "on the caller's machine. Intended primarily for sending generated reports.",
       inputSchema: {
         type: "object",
         properties: {
@@ -114,22 +183,21 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
           attachments: {
             description:
-              "File attachment(s). Each item is EITHER a local file path string (only works " +
-              "when the server process can read the path — i.e. the local stdio connector, not " +
-              "the remote gateway) OR a pre-encoded content object for remote/gateway use: " +
-              "{ filename: string, content_base64: string, mimetype?: string }. " +
-              "To attach a file via the remote gateway, base64-encode it first " +
-              "(e.g. Bash: base64 -i /path/to/file) and pass the object form.",
+              "File attachment(s). Preferred form for large files (works in all runtimes): " +
+              "{ filename, url, mimetype? } where url is HTTPS from an allowed host. " +
+              "For small files inline: { filename, content_base64, mimetype? }. " +
+              "File path strings only work on the local stdio connector.",
             anyOf: [
               { type: "string" },
               {
                 type: "object",
                 properties: {
                   filename: { type: "string" },
-                  content_base64: { type: "string", description: "Base64-encoded file content." },
+                  url: { type: "string", description: "HTTPS URL the server will fetch. Host must be in the allowlist." },
+                  content_base64: { type: "string", description: "Base64-encoded file content (small files / no hosting)." },
                   mimetype: { type: "string" },
                 },
-                required: ["filename", "content_base64"],
+                required: ["filename"],
               },
               {
                 type: "array",
@@ -140,10 +208,11 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
                       type: "object",
                       properties: {
                         filename: { type: "string" },
+                        url: { type: "string" },
                         content_base64: { type: "string" },
                         mimetype: { type: "string" },
                       },
-                      required: ["filename", "content_base64"],
+                      required: ["filename"],
                     },
                   ],
                 },
